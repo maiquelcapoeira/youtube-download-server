@@ -1,9 +1,7 @@
-// YouTube Download Server for Render.com
-// Free, always-on, no maintenance needed
-
+// YouTube Download Server using ytdl-core (pure JavaScript, no yt-dlp needed)
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const ytdl = require('@distube/ytdl-core');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -22,7 +20,7 @@ if (!fs.existsSync(TEMP_DIR)) {
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
-    message: 'YouTube Download Server Running',
+    message: 'YouTube Download Server Running (ytdl-core)',
     endpoints: {
       health: '/health',
       download: 'POST /download with {url: "youtube_url"}'
@@ -34,7 +32,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-app.post('/download', (req, res) => {
+app.post('/download', async (req, res) => {
   const { url } = req.body;
 
   if (!url) {
@@ -43,50 +41,58 @@ app.post('/download', (req, res) => {
 
   console.log('Download request:', url);
 
-  const timestamp = Date.now();
-  const outputTemplate = path.join(TEMP_DIR, `song_${timestamp}.%(ext)s`);
-  
-  // Use yt-dlp to download
-  const command = `yt-dlp -x --audio-format mp3 --audio-quality 0 -o "${outputTemplate}" "${url}"`;
-
-  exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
-    if (error) {
-      console.error('Download error:', stderr);
-      return res.status(500).json({ 
-        error: 'Download failed', 
-        details: stderr.substring(0, 200) 
-      });
-    }
-
-    const mp3File = path.join(TEMP_DIR, `song_${timestamp}.mp3`);
+  try {
+    const info = await ytdl.getInfo(url);
+    const audioFormats = ytdl.filterFormats(info.formats, 'audioonly');
     
-    if (!fs.existsSync(mp3File)) {
-      return res.status(500).json({ error: 'File not found after download' });
+    if (audioFormats.length === 0) {
+      return res.status(500).json({ error: 'No audio formats available' });
     }
 
-    console.log('Download complete, sending file');
+    const bestAudio = audioFormats[0];
+    const timestamp = Date.now();
+    const filename = `song_${timestamp}.mp3`;
+    const filepath = path.join(TEMP_DIR, filename);
 
-    res.download(mp3File, `song_${timestamp}.mp3`, (err) => {
-      if (err) {
-        console.error('Send error:', err);
-      }
-      // Clean up after 30 seconds
-      setTimeout(() => {
-        try {
-          if (fs.existsSync(mp3File)) {
-            fs.unlinkSync(mp3File);
-            console.log('Cleaned up:', mp3File);
+    console.log('Downloading:', info.videoDetails.title);
+
+    const writeStream = fs.createWriteStream(filepath);
+    
+    ytdl(url, { format: bestAudio })
+      .pipe(writeStream)
+      .on('finish', () => {
+        console.log('Download complete, sending file');
+        
+        res.download(filepath, filename, (err) => {
+          if (err) {
+            console.error('Send error:', err);
           }
-        } catch (e) {
-          console.error('Cleanup error:', e);
-        }
-      }, 30000);
-    });
-  });
+          // Clean up
+          setTimeout(() => {
+            try {
+              if (fs.existsSync(filepath)) {
+                fs.unlinkSync(filepath);
+                console.log('Cleaned up:', filepath);
+              }
+            } catch (e) {
+              console.error('Cleanup error:', e);
+            }
+          }, 30000);
+        });
+      })
+      .on('error', (error) => {
+        console.error('Download error:', error);
+        res.status(500).json({ error: 'Download failed', details: error.message });
+      });
+
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Failed to process video', details: error.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🎵 YouTube Download Server`);
+  console.log(`\n🎵 YouTube Download Server (ytdl-core)`);
   console.log(`📡 Running on port ${PORT}`);
   console.log(`🌍 Ready to serve requests\n`);
 });
